@@ -1,298 +1,6 @@
 <!DOCTYPE html>
 <html lang="ja"><head>
     <script src="https://cdnjs.cloudflare.com/ajax/libs/html-to-image/1.11.13/html-to-image.min.js" integrity="sha512-iZ2ORl595Wx6miw+GuadDet4WQbdSWS3JLMoNfY8cRGoEFy6oT3G9IbcrBeL6AfkgpA51ETt/faX6yLV+/gFJg==" crossorigin="anonymous" referrerpolicy="no-referrer"></script>
-    <script>
-      (function() {
-        // Capture host references before any artifact code runs: Window.parent
-        // is [Replaceable] (a top-level `var parent` in artifact code would
-        // replace the accessor with a data property), and a top-level
-        // `const crypto` would shadow the global — either would otherwise
-        // silently break the bridge for artifacts that worked before.
-        const realParent = window.parent;
-        const cryptoObj = window.crypto;
-        // crypto.randomUUID exists only in Secure Contexts; fall back to a
-        // unique non-crypto id elsewhere (http://LAN-IP dev flows) —
-        // uniqueness is what the bridge needs, unpredictability is
-        // defense-in-depth on top of the source guards.
-        const newRequestId =
-          cryptoObj && typeof cryptoObj.randomUUID === "function"
-            ? function () { return cryptoObj.randomUUID(); }
-            : function () { return Date.now() + "-" + Math.random(); };
-        const originalConsole = window.console;
-        window.console = {
-          log: (...args) => {
-            originalConsole.log(...args);
-            realParent.postMessage({ type: 'console', message: args.join(' ') }, '*');
-          },
-          error: (...args) => {
-            originalConsole.error(...args);
-            realParent.postMessage({ type: 'console', message: 'Error: ' + args.join(' ') }, '*');
-          },
-          warn: (...args) => {
-            originalConsole.warn(...args);
-            realParent.postMessage({ type: 'console', message: 'Warning: ' + args.join(' ') }, '*');
-          }
-        };
-
-        // Bridge request ids are crypto-random (not sequential) so they
-        // cannot be predicted by other frames in the tab.
-        let callbacksMap = new Map();
-        let streamControllers = new Map();
-        
-        window.claude = {
-          complete: (prompt) => {
-            return new Promise((resolve, reject) => {
-              const id = newRequestId();
-              callbacksMap.set(id, { resolve, reject });
-              realParent.postMessage({ type: 'claudeComplete', id, prompt }, '*');
-            });
-          }
-        };
-
-        window.storage = {
-          get: (key, shared = false) => {
-            return new Promise((resolve, reject) => {
-              const id = newRequestId();
-              callbacksMap.set(id, { resolve, reject });
-              realParent.postMessage({ type: 'storageGet', id, key, shared }, '*');
-            });
-          },
-          set: (key, value, shared = false) => {
-            return new Promise((resolve, reject) => {
-              const id = newRequestId();
-              callbacksMap.set(id, { resolve, reject });
-              realParent.postMessage({ type: 'storageSet', id, key, value, shared }, '*');
-            });
-          },
-          delete: (key, shared = false) => {
-            return new Promise((resolve, reject) => {
-              const id = newRequestId();
-              callbacksMap.set(id, { resolve, reject });
-              realParent.postMessage({ type: 'storageDelete', id, key, shared }, '*');
-            });
-          },
-          list: (prefix, shared = false) => {
-            return new Promise((resolve, reject) => {
-              const id = newRequestId();
-              callbacksMap.set(id, { resolve, reject });
-              realParent.postMessage({ type: 'storageList', id, prefix, shared }, '*');
-            });
-          }
-        };
-
-        let pendingBlobs = new Map();
-        URL.createObjectURL = (blob) => {
-          // Store the blob and create an ID and URL for it
-          const blobId = `blob-${Date.now()}-${Math.random()}`;
-          pendingBlobs.set(blobId, blob);
-          return `blob-request://${blobId}`;
-        };
-
-        URL.revokeObjectURL = (url) => {
-          // Remove the blob from our store
-          const blobId = url.replace("blob-request://", "");
-          pendingBlobs.delete(blobId);
-        };
-
-        const getBlobFromURL = (url) => {
-          const blobId = url.replace("blob-request://", "");
-          return pendingBlobs.get(blobId);
-        };
-
-        // Override global fetch with streaming support
-        window.fetch = (url, init = {}) => {
-          return new Promise((resolve, reject) => {
-            const id = newRequestId();
-            const channelId = `fetch-${id}-${Date.now()}`;
-            
-            callbacksMap.set(id, { 
-              resolve: (response) => {
-                // Null-body statuses: Response(stream, {status: 204}) throws
-                // per the Fetch spec, which would escape this resolver and
-                // hang the artifact's await forever.
-                if (response.status === 204 || response.status === 205 || response.status === 304) {
-                  try {
-                    resolve(new Response(null, {
-                      status: response.status,
-                      statusText: response.statusText,
-                      headers: response.headers
-                    }));
-                  } catch (err) {
-                    // Invalid statusText/header bytes can throw here too.
-                    reject(new TypeError(
-                      'Bridge fetch: unconstructable response (status ' + response.status + ')'
-                    ));
-                  }
-                  return;
-                }
-                // Create a ReadableStream for the response body
-                const stream = new ReadableStream({
-                  start(controller) {
-                    streamControllers.set(channelId, controller);
-                  },
-                  cancel() {
-                    streamControllers.delete(channelId);
-                  }
-                });
-                
-                // Create and return the Response with the stream. Response()
-                // requires status in [200, 599]; an opaque/no-cors fetch
-                // forwards status 0, which would throw here and escape the
-                // resolver, hanging the artifact's await. Surface it as a
-                // network-error-shaped rejection instead.
-                try {
-                  resolve(new Response(stream, {
-                    status: response.status,
-                    statusText: response.statusText,
-                    headers: response.headers
-                  }));
-                } catch (err) {
-                  streamControllers.delete(channelId);
-                  reject(new TypeError(
-                    'Bridge fetch: unconstructable response (status ' + response.status + ')'
-                  ));
-                }
-              },
-              reject,
-              channelId
-            });
-            
-            realParent.postMessage({
-              type: 'proxyFetch',
-              id,
-              url,
-              init,
-              channelId
-            }, '*');
-          });
-        };
-
-        window.addEventListener('message', async (event) => {
-          // Only the embedding parent may drive the bridge — sibling and
-          // nested frames can also postMessage into this window.
-          if (event.source !== realParent) return;
-          if (event.data.type === 'takeScreenshot') {
-            // Echo the request's nonce so the requester can correlate the
-            // reply to ITS request — a reply without the expected nonce
-            // (e.g. from a stale pre-remount artifact) is ignored upstream.
-            const screenshotNonce = event.data.nonce;
-            const rootElement = document.getElementById('artifacts-component-root-html');
-            if (!rootElement) {
-              realParent.postMessage({
-                type: 'screenshotError',
-                nonce: screenshotNonce,
-                error: new Error('Root element not found'),
-              }, '*');
-              return;
-            }
-            // Catch CDN load failures (htmlToImage undefined) and toPng errors
-            // so the parent always gets a response instead of hanging forever.
-            try {
-              const screenshot = await htmlToImage.toPng(rootElement, {
-                imagePlaceholder:
-                  "data:image/png;base64,iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAYAAAAfFcSJAAAAAXNSR0IArs4c6QAAAA1JREFUGFdjePDgwX8ACOQDoNsk0PMAAAAASUVORK5CYII=",
-              });
-              realParent.postMessage({
-                type: 'screenshotData',
-                nonce: screenshotNonce,
-                data: screenshot,
-              }, '*');
-            } catch (err) {
-              realParent.postMessage({
-                type: 'screenshotError',
-                nonce: screenshotNonce,
-                error: err instanceof Error ? err : new Error(String(err)),
-              }, '*');
-            }
-          } else if (event.data.type === 'claudeComplete') {
-            const callback = callbacksMap.get(event.data.id);
-            if (!callback) return;
-            if (event.data.error) {
-              callback.reject(new Error(event.data.error));
-            } else {
-              callback.resolve(event.data.completion);
-            }
-            callbacksMap.delete(event.data.id);
-          } else if (event.data.type === 'proxyFetchResponse') {
-            const callback = callbacksMap.get(event.data.id);
-            if (!callback) return;
-            if (event.data.error) {
-              callback.reject(new Error(event.data.error));
-              callbacksMap.delete(event.data.id);
-            } else {
-              // Initial response with headers, status, etc.
-              callback.resolve({
-                status: event.data.status,
-                statusText: event.data.statusText,
-                headers: event.data.headers
-              });
-              // Don't delete the callback yet if streaming
-              if (!event.data.body) {
-                callbacksMap.delete(event.data.id);
-              }
-            }
-          } else if (event.data.type === 'proxyFetchStream') {
-            // Handle streaming data chunks
-            const controller = streamControllers.get(event.data.channelId);
-            if (controller) {
-              if (event.data.error) {
-                controller.error(new Error(event.data.error));
-                streamControllers.delete(event.data.channelId);
-              } else if (event.data.done) {
-                controller.close();
-                streamControllers.delete(event.data.channelId);
-                // Clean up the callback
-                const callback = Array.from(callbacksMap.entries()).find(
-                  ([_, value]) => value.channelId === event.data.channelId
-                );
-                if (callback) {
-                  callbacksMap.delete(callback[0]);
-                }
-              } else if (event.data.chunk) {
-                controller.enqueue(new Uint8Array(event.data.chunk));
-              }
-            }
-          } else if (event.data.type === 'storageGet') {
-            const callback = callbacksMap.get(event.data.id);
-            if (!callback) return;
-            if (event.data.error) {
-              callback.reject(new Error(event.data.error));
-            } else {
-              callback.resolve(event.data.result);
-            }
-            callbacksMap.delete(event.data.id);
-          } else if (event.data.type === 'storageSet') {
-            const callback = callbacksMap.get(event.data.id);
-            if (!callback) return;
-            if (event.data.error) {
-              callback.reject(new Error(event.data.error));
-            } else {
-              callback.resolve(event.data.result);
-            }
-            callbacksMap.delete(event.data.id);
-          } else if (event.data.type === 'storageDelete') {
-            const callback = callbacksMap.get(event.data.id);
-            if (!callback) return;
-            if (event.data.error) {
-              callback.reject(new Error(event.data.error));
-            } else {
-              callback.resolve(event.data.result);
-            }
-            callbacksMap.delete(event.data.id);
-          } else if (event.data.type === 'storageList') {
-            const callback = callbacksMap.get(event.data.id);
-            if (!callback) return;
-            if (event.data.error) {
-              callback.reject(new Error(event.data.error));
-            } else {
-              callback.resolve(event.data.result);
-            }
-            callbacksMap.delete(event.data.id);
-          }
-        });
-
-      })();
-    </script>
   
 <meta charset="UTF-8">
 <meta name="viewport" content="width=device-width, initial-scale=1">
@@ -636,7 +344,10 @@ Ph.D. 専門は建築史と建築論 日本建築学会所属 日本映像学会
     <div class="container">
       <span class="eyebrow">LOG / 更新ログ</span>
       <h2 class="section-heading">更新ログ</h2>
-      <div id="log-container"><div class="log-list"><div class="log-item"><div class="log-date">2026-06-29</div><div><h3 class="log-title">(*´ω【ちょっと遅くなったけど おめでとにゃ】ωΦ)੭⁾⁾ </h3><p class="log-text">サッカー日本代表 第3戦目 (*´ω｀*) おめでとう！</p><a class="work-link" href="https://x.com/naruruel/status/2071533323416133759/photo/1" target="_blank" rel="noopener noreferrer">詳しく見る →</a></div></div></div></div>
+      <div id="log-container"><div class="log-list"><div class="log-item"><div class="log-date">2026-07-03</div><div><h3 class="log-title">(*´ω【まっ まさかの温泉回…W】ωΦ)੭⁾⁾</h3><p class="log-text">板子（いたこ）一枚 下は地獄… じゃないけどさぁ…W
+薄いタオル一枚の下には どんな地獄があるのやら…W</p><a class="work-link" href="https://x.com/naruruel/status/2072979813435158541/photo/1" target="_blank" rel="noopener noreferrer">詳しく見る →</a></div></div><div class="log-item"><div class="log-date">2026-07-03</div><div><h3 class="log-title">(*´ω【今週も お疲れさまでした】ωΦ)੭⁾⁾     </h3><p class="log-text">当面は 月 水 金 のUP（ UP時間は 20時か 21時かくらいです／あくまでも 目安で 早い場合もあります）と云いますか ゆったりとした活動で かなり ゆっくりめの行動となります…      
+ (*´ω｀*) しばらくは まったりとおつきあいください… それでは みなさま また来週 お会い いたしましょうノシ</p><a class="work-link" href="https://x.com/naruruel/status/2072980821255078183/photo/1" target="_blank" rel="noopener noreferrer">詳しく見る →</a></div></div><div class="log-item"><div class="log-date">2026-07-01</div><div><h3 class="log-title">(*´ω【今は ただひたすら おつかれさま にゃ】ωΦ)੭⁾⁾</h3><p class="log-text">サッカー日本代表 ブラジル戦 (*´ω｀*) おつかれさまでした！凄い一戦だったねぇ
+前半 一点 入った時 夜中だったけど 大きな声出しちゃった にゃ (*ΦωΦ)੭⁾⁾ にゃぁぁぁぁあ（Goal...）Wノシ</p><a class="work-link" href="https://x.com/naruruel/status/2072241787293585658/photo/1" target="_blank" rel="noopener noreferrer">詳しく見る →</a></div></div><div class="log-item"><div class="log-date">2026-06-29</div><div><h3 class="log-title">(*´ω【ちょっと遅くなったけど おめでとにゃ】ωΦ)੭⁾⁾ </h3><p class="log-text">サッカー日本代表 第3戦目 (*´ω｀*) おめでとう！</p><a class="work-link" href="https://x.com/naruruel/status/2071533323416133759/photo/1" target="_blank" rel="noopener noreferrer">詳しく見る →</a></div></div></div></div>
     </div>
   </section>
 
@@ -737,7 +448,7 @@ Ph.D. 専門は建築史と建築論 日本建築学会所属 日本映像学会
 
     <div class="drawer-section">
       <h3><small>LOG</small>更新ログ</h3>
-      <div id="log-edit-list"><div class="item-edit"><div class="remove-row"><button type="button" class="remove-btn">削除</button></div><div class="field"><label>日付</label><input type="date"></div><div class="field"><label>タイトル</label><input type="text"></div><div class="field"><label>本文</label><textarea rows="3"></textarea></div><div class="field"><label>リンク（任意・URL）</label><input type="text"></div></div></div>
+      <div id="log-edit-list"><div class="item-edit"><div class="remove-row"><button type="button" class="remove-btn">削除</button></div><div class="field"><label>日付</label><input type="date"></div><div class="field"><label>タイトル</label><input type="text"></div><div class="field"><label>本文</label><textarea rows="3"></textarea></div><div class="field"><label>リンク（任意・URL）</label><input type="text"></div></div><div class="item-edit"><div class="remove-row"><button type="button" class="remove-btn">削除</button></div><div class="field"><label>日付</label><input type="date"></div><div class="field"><label>タイトル</label><input type="text"></div><div class="field"><label>本文</label><textarea rows="3"></textarea></div><div class="field"><label>リンク（任意・URL）</label><input type="text"></div></div><div class="item-edit"><div class="remove-row"><button type="button" class="remove-btn">削除</button></div><div class="field"><label>日付</label><input type="date"></div><div class="field"><label>タイトル</label><input type="text"></div><div class="field"><label>本文</label><textarea rows="3"></textarea></div><div class="field"><label>リンク（任意・URL）</label><input type="text"></div></div><div class="item-edit"><div class="remove-row"><button type="button" class="remove-btn">削除</button></div><div class="field"><label>日付</label><input type="date"></div><div class="field"><label>タイトル</label><input type="text"></div><div class="field"><label>本文</label><textarea rows="3"></textarea></div><div class="field"><label>リンク（任意・URL）</label><input type="text"></div></div></div>
       <button type="button" class="btn secondary small" id="add-log">＋ ログを追加</button>
     </div>
 
@@ -783,7 +494,7 @@ Ph.D. 専門は建築史と建築論 日本建築学会所属 日本映像学会
   </div>
 </div>
 
-<div class="toast" id="toast"></div>
+<div class="toast" id="toast">保存しました</div>
 
 <script>
 (function(){
@@ -912,6 +623,27 @@ Ph.D. 専門は建築史と建築論 日本建築学会所属 日本映像学会
       "title": "(*´ω【ちょっと遅くなったけど おめでとにゃ】ωΦ)੭⁾⁾ ",
       "text": "サッカー日本代表 第3戦目 (*´ω｀*) おめでとう！",
       "url": "https://x.com/naruruel/status/2071533323416133759/photo/1"
+    },
+    {
+      "id": "1tjs5flt",
+      "date": "2026-07-01",
+      "title": "(*´ω【今は ただひたすら おつかれさま にゃ】ωΦ)੭⁾⁾",
+      "text": "サッカー日本代表 ブラジル戦 (*´ω｀*) おつかれさまでした！凄い一戦だったねぇ\n前半 一点 入った時 夜中だったけど 大きな声出しちゃった にゃ (*ΦωΦ)੭⁾⁾ にゃぁぁぁぁあ（Goal...）Wノシ",
+      "url": "https://x.com/naruruel/status/2072241787293585658/photo/1"
+    },
+    {
+      "id": "ztopqmf6",
+      "date": "2026-07-03",
+      "title": "(*´ω【まっ まさかの温泉回…W】ωΦ)੭⁾⁾",
+      "text": "板子（いたこ）一枚 下は地獄… じゃないけどさぁ…W\n薄いタオル一枚の下には どんな地獄があるのやら…W",
+      "url": "https://x.com/naruruel/status/2072979813435158541/photo/1"
+    },
+    {
+      "id": "zwqf7m04",
+      "date": "2026-07-03",
+      "title": "(*´ω【今週も お疲れさまでした】ωΦ)੭⁾⁾     ",
+      "text": "当面は 月 水 金 のUP（ UP時間は 20時か 21時かくらいです／あくまでも 目安で 早い場合もあります）と云いますか ゆったりとした活動で かなり ゆっくりめの行動となります…      \n (*´ω｀*) しばらくは まったりとおつきあいください… それでは みなさま また来週 お会い いたしましょうノシ",
+      "url": "https://x.com/naruruel/status/2072980821255078183/photo/1"
     }
   ],
   "links": [
