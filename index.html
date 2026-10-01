@@ -695,6 +695,52 @@ Ph.D. 専門は建築史と建築論 日本建築学会所属 日本映像学会
   var state = { content: defaultContent(), authHash:null };
   var draft = null;
   var storageAvailable = false;
+  // log.txt から読み込んだ更新ログ（読めなかったときは null のまま → 埋め込みの log を表示）
+  var fileLog = null;
+
+  /* ---------- log.txt ---------- */
+  // 書式：「---」の行で1件ずつ区切る。1行目「日付 | タイトル」、続く行が本文、
+  // 最後の行が http で始まればリンク。「#」で始まる行は無視する。
+  function parseLogText(raw){
+    var lines = String(raw).replace(/^﻿/, '').split(/\r?\n/);
+    var blocks = [], cur = [];
+    lines.forEach(function(line){
+      if(/^#/.test(line)) return;
+      if(line.trim() === '---'){ blocks.push(cur); cur = []; return; }
+      cur.push(line);
+    });
+    blocks.push(cur);
+
+    var items = [];
+    blocks.forEach(function(block){
+      while(block.length && !block[0].trim()) block.shift();
+      while(block.length && !block[block.length-1].trim()) block.pop();
+      if(!block.length) return;
+      var head = block.shift();
+      var sep = head.indexOf('|');
+      var date = sep === -1 ? '' : head.slice(0, sep).trim();
+      var title = sep === -1 ? head.trim() : head.slice(sep + 1).trim();
+      var url = '';
+      if(block.length && /^https?:\/\//.test(block[block.length-1].trim())){
+        url = block.pop().trim();
+        while(block.length && !block[block.length-1].trim()) block.pop();
+      }
+      if(!title) return;
+      items.push({ date: date, title: title, text: block.join('\n'), url: url });
+    });
+    return items;
+  }
+  async function loadLogFile(){
+    try{
+      var res = await withTimeout(fetch('log.txt', { cache:'no-cache' }), 8000, 'TIMEOUT');
+      if(!res.ok) return null;
+      var items = parseLogText(await res.text());
+      return items.length ? items : null;
+    }catch(e){
+      console.warn('log.txt を読み込めなかったため、予備のログを表示します', e);
+      return null;
+    }
+  }
 
   /* ---------- storage helpers ---------- */
   function withTimeout(promise, ms, message){
@@ -752,6 +798,9 @@ Ph.D. 専門は建築史と建築論 日本建築学会所属 日本映像学会
     // 閲覧専用モード判定（エクスポート版に付与される属性）
     var isReadonly = document.body.getAttribute('data-readonly') === 'true';
 
+    // 更新ログ（log.txt）の読み込みを先に始めておく
+    var logFilePromise = loadLogFile();
+
     // まずストレージからデータの読み込みを試みる
     var c = null, legacyBg = null, a = null;
     storageAvailable = false;
@@ -805,6 +854,8 @@ Ph.D. 専門は建築史と建築論 日本建築学会所属 日本映像学会
     }else{
       state.authHash = null;
     }
+
+    fileLog = await logFilePromise;
 
     renderAll();
     document.getElementById('loading').hidden = true;
@@ -897,7 +948,7 @@ Ph.D. 専門は建築史と建築論 日本建築学会所属 日本映像学会
 
   function renderLog(){
     var box = document.getElementById('log-container');
-    var items = (state.content.log || []).slice().sort(function(a,b){
+    var items = (fileLog || state.content.log || []).slice().sort(function(a,b){
       return (b.date||'').localeCompare(a.date||'');
     });
     if(!items.length){
