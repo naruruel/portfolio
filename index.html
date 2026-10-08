@@ -162,6 +162,12 @@
   .log-date{ font-family:var(--font-mono); font-size:.76rem; color:var(--slate); padding-top:.3rem; }
   .log-title{ font-family:var(--font-display); font-weight:600; font-size:1.04rem; margin:0 0 .4rem; }
   .log-text{ font-size:.9rem; line-height:1.85; opacity:.85; white-space:pre-wrap; }
+  /* X・Bluesky の投稿の埋め込み（幅は本文欄にそろえる。X は公式の仕様で最大550px） */
+  .log-embed{ min-width:0; max-width:100%; }
+  .log-embed .twitter-tweet{ margin:0 !important; }
+  .log-embed iframe{ max-width:100%; }
+  .log-embed-bsky{ display:block; width:100%; max-width:600px; height:240px; border:none; background:transparent; }
+  .log-embed .work-link{ margin-top:0; }
   @media (max-width:520px){
     .log-item{ grid-template-columns:1fr; }
     .log-date{ padding-top:0; margin-bottom:.2rem; }
@@ -701,6 +707,42 @@ Ph.D. 専門は建築史と建築論 日本建築学会所属 日本映像学会
   /* ---------- log.txt ---------- */
   // 書式：「---」の行で1件ずつ区切る。1行目「日付 | タイトル」、続く行が本文、
   // 最後の行が http で始まればリンク。「#」で始まる行は無視する。
+  // 区切りの中身が X か Bluesky の投稿URL 1行だけなら、その投稿の埋め込みにする。
+  var X_POST_RE = /^https?:\/\/(?:www\.|mobile\.)?(?:x|twitter)\.com\/[^\/\s]+\/status(?:es)?\/(\d+)(?:[\/?#]\S*)?$/i;
+  var BSKY_POST_RE = /^https?:\/\/(?:www\.)?bsky\.app\/profile\/([^\/\s]+)\/post\/([a-z2-7]{13})(?:[\/?#]\S*)?$/i;
+
+  // 日時（ミリ秒）を日本時間の「2026-10-01」の形にする
+  function jstDateString(ms){
+    if(!isFinite(ms)) return '';
+    var d = new Date(ms + 9 * 3600 * 1000);
+    if(isNaN(d.getTime())) return '';
+    return d.toISOString().slice(0, 10);
+  }
+  // X の投稿番号には投稿時刻が含まれている（番号を 2^22 で割り、基準時刻を足すとミリ秒になる）
+  function xPostTime(id){
+    try{ return Number(BigInt(id) >> BigInt(22)) + 1288834974657; }
+    catch(e){ return NaN; }
+  }
+  // Bluesky の投稿ID（13文字）にも投稿時刻（マイクロ秒）が含まれている
+  function bskyPostTime(rkey){
+    var chars = '234567abcdefghijklmnopqrstuvwxyz';
+    var n = 0;
+    rkey = rkey.toLowerCase();
+    for(var i=0; i<rkey.length; i++){
+      var v = chars.indexOf(rkey.charAt(i));
+      if(v === -1) return NaN;
+      n = n * 32 + v;
+    }
+    // 末尾の10ビットは時刻ではないので取り除き、マイクロ秒→ミリ秒にする
+    return Math.floor(n / 1024 / 1000);
+  }
+  function parseEmbedLine(line){
+    var m = X_POST_RE.exec(line);
+    if(m) return { embed:'x', postId:m[1], url:line, date:jstDateString(xPostTime(m[1])) };
+    m = BSKY_POST_RE.exec(line);
+    if(m) return { embed:'bsky', actor:m[1], rkey:m[2], url:line, date:jstDateString(bskyPostTime(m[2])) };
+    return null;
+  }
   function parseLogText(raw){
     var lines = String(raw).replace(/^﻿/, '').split(/\r?\n/);
     var blocks = [], cur = [];
@@ -716,6 +758,10 @@ Ph.D. 専門は建築史と建築論 日本建築学会所属 日本映像学会
       while(block.length && !block[0].trim()) block.shift();
       while(block.length && !block[block.length-1].trim()) block.pop();
       if(!block.length) return;
+      if(block.length === 1){
+        var embedItem = parseEmbedLine(block[0].trim());
+        if(embedItem){ items.push(embedItem); return; }
+      }
       var head = block.shift();
       var sep = head.indexOf('|');
       var date = sep === -1 ? '' : head.slice(0, sep).trim();
@@ -970,6 +1016,12 @@ Ph.D. 専門は建築史と建築論 日本建築学会所属 日本映像学会
       date.textContent = item.date || '';
       row.appendChild(date);
 
+      if(item.embed){
+        row.appendChild(renderPostEmbed(item));
+        list.appendChild(row);
+        return;
+      }
+
       var body = document.createElement('div');
       var title = document.createElement('h3');
       title.className = 'log-title';
@@ -995,6 +1047,116 @@ Ph.D. 専門は建築史と建築論 日本建築学会所属 日本映像学会
     });
     box.innerHTML = '';
     box.appendChild(list);
+  }
+
+  /* ---------- X・Bluesky の投稿の埋め込み ---------- */
+  var EMBED_TIMEOUT = 10000;
+  var twitterWidgetsPromise = null;
+  // X の公式部品（widgets.js）を1回だけ読み込む
+  function loadTwitterWidgets(){
+    if(twitterWidgetsPromise) return twitterWidgetsPromise;
+    twitterWidgetsPromise = new Promise(function(resolve, reject){
+      if(window.twttr && window.twttr.widgets){ resolve(window.twttr); return; }
+      var s = document.createElement('script');
+      s.src = 'https://platform.twitter.com/widgets.js';
+      s.async = true;
+      s.charset = 'utf-8';
+      s.onload = function(){
+        if(window.twttr && window.twttr.ready){ window.twttr.ready(resolve); }
+        else reject(new Error('TWTTR_UNAVAILABLE'));
+      };
+      s.onerror = function(){ reject(new Error('TWTTR_BLOCKED')); };
+      document.head.appendChild(s);
+    });
+    // 失敗したら次の描画で読み込みをやり直せるようにする
+    twitterWidgetsPromise.catch(function(){ twitterWidgetsPromise = null; });
+    return twitterWidgetsPromise;
+  }
+
+  function postFallbackLink(item){
+    var a = document.createElement('a');
+    a.className = 'work-link';
+    a.href = item.url;
+    a.target = '_blank';
+    a.rel = 'noopener noreferrer';
+    a.textContent = item.embed === 'bsky' ? 'Blueskyの投稿を見る →' : 'Xの投稿を見る →';
+    return a;
+  }
+
+  function renderPostEmbed(item){
+    var holder = document.createElement('div');
+    holder.className = 'log-embed';
+    var settled = false;
+    var fallback = null;
+    function fail(){
+      if(settled) return;
+      settled = true;
+      fallback = postFallbackLink(item);
+      holder.innerHTML = '';
+      holder.appendChild(fallback);
+    }
+    // 待ち時間を過ぎてから表示できた場合は、代わりのリンクを片付ける
+    function done(){
+      settled = true;
+      if(fallback && fallback.parentNode) fallback.parentNode.removeChild(fallback);
+    }
+    var timer = setTimeout(fail, EMBED_TIMEOUT);
+    function finish(ok){ clearTimeout(timer); if(ok) done(); else fail(); }
+
+    if(item.embed === 'x') embedXPost(item, holder, finish);
+    else embedBskyPost(item, holder, finish);
+    return holder;
+  }
+
+  function embedXPost(item, holder, finish){
+    loadTwitterWidgets().then(function(twttr){
+      // 本文欄の幅にそろえる（X の公式の仕様で 250〜550px の範囲）
+      var w = Math.max(250, Math.min(550, holder.clientWidth || 550));
+      return twttr.widgets.createTweet(item.postId, holder, {
+        theme:'light', lang:'ja', width:w, align:'left', dnt:true
+      });
+    }).then(function(el){
+      // 投稿が削除・非公開などのときは何も返ってこない
+      finish(!!el);
+    }, function(){ finish(false); });
+  }
+
+  function embedBskyPost(item, holder, finish){
+    var api = 'https://public.api.bsky.app/xrpc/';
+    var didPromise = /^did:/.test(item.actor)
+      ? Promise.resolve(item.actor)
+      : fetch(api + 'com.atproto.identity.resolveHandle?handle=' + encodeURIComponent(item.actor))
+          .then(function(r){ if(!r.ok) throw new Error('RESOLVE'); return r.json(); })
+          .then(function(j){ if(!j.did) throw new Error('RESOLVE'); return j.did; });
+
+    didPromise.then(function(did){
+      var uri = 'at://' + did + '/app.bsky.feed.post/' + item.rkey;
+      // 投稿が残っているかを先に確かめる（削除済みなら空で返ってくる）
+      return fetch(api + 'app.bsky.feed.getPosts?uris=' + encodeURIComponent(uri))
+        .then(function(r){ if(!r.ok) throw new Error('GETPOSTS'); return r.json(); })
+        .then(function(j){
+          if(!j.posts || !j.posts.length) throw new Error('NOT_FOUND');
+          return did;
+        });
+    }).then(function(did){
+      var frameId = 'bsky-' + uid();
+      var iframe = document.createElement('iframe');
+      iframe.className = 'log-embed-bsky';
+      iframe.title = 'Blueskyの投稿';
+      iframe.src = 'https://embed.bsky.app/embed/' + did + '/app.bsky.feed.post/' + item.rkey
+        + '?id=' + frameId + '&colorMode=light&lang=ja';
+      // 埋め込み側から届く「高さ」の知らせで、iframe の高さを中身に合わせる
+      function onMessage(ev){
+        if(ev.origin !== 'https://embed.bsky.app' || !ev.data || ev.data.id !== frameId) return;
+        if(ev.data.height){
+          iframe.style.height = ev.data.height + 'px';
+          finish(true);
+        }
+      }
+      window.addEventListener('message', onMessage);
+      iframe.addEventListener('error', function(){ finish(false); });
+      holder.appendChild(iframe);
+    }).catch(function(){ finish(false); });
   }
 
   function renderLinks(){
