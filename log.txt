@@ -36,11 +36,7 @@
 # https://bsky.app/profile/example.bsky.social/post/3lxxxxxxxxxxx
 # ===========================
 ---
-2026-10-07 |(*´ω【新しいプロジェクトです】ωΦ)੭⁾⁾
-地獄帝国郵便局 公式目録
-https://naruruel.github.io/postes-imperiales-des-enfers/
-当局 切手頒布窓口 Rarible https://og.rarible.com/collection/0x534345e8ecc874cf8986260e0caf4602e58b6187/items
-https://x.com/naruruel/status/2107761727798743198
+https://x.com/naruruel/status/2111026522651791365
 ---
 https://x.com/naruruel/status/2107757446978490869
 ---
@@ -51,4 +47,6 @@ https://x.com/naruruel/status/2105946191494316260
 https://x.com/naruruel/status/2108478654498177446
 ---
 https://x.com/naruruel/status/2110299124260315300
+---
+https://x.com/naruruel/status/2112115818628808778
 ---
