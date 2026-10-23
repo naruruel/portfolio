@@ -36,17 +36,15 @@
 # https://bsky.app/profile/example.bsky.social/post/3lxxxxxxxxxxx
 # ===========================
 ---
-https://x.com/naruruel/status/2111026522651791365
+https://x.com/naruruel/status/2113550656221196368
 ---
-https://x.com/naruruel/status/2107757446978490869
+https://x.com/naruruel/status/2112821846924214576
 ---
-https://x.com/naruruel/status/2105226534848229507
----
-https://x.com/naruruel/status/2105946191494316260
----
-https://x.com/naruruel/status/2108478654498177446
----
-https://x.com/naruruel/status/2110299124260315300
+https://x.com/naruruel/status/2113550740446925179
 ---
 https://x.com/naruruel/status/2112115818628808778
 ---
+https://x.com/naruruel/status/2111026522651791365
+---
+https://x.com/naruruel/status/2108478654498177446
+
