@@ -36,6 +36,8 @@
 # https://bsky.app/profile/example.bsky.social/post/3lxxxxxxxxxxx
 # ===========================
 ---
+https://x.com/naruruel/status/2122974472147763307
+---
 https://x.com/naruruel/status/2122250113699725747
 ---
 https://x.com/naruruel/status/2122249110736732617
@@ -53,5 +55,3 @@ https://x.com/naruruel/status/2118619651244777861
 https://x.com/naruruel/status/2118619477566947369
 ---
 https://x.com/naruruel/status/2117906297752621529
----
-https://x.com/naruruel/status/2117213207429595601
